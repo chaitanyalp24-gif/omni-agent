@@ -3,6 +3,7 @@ import os
 import io
 import time
 import json
+import re
 import shutil
 from datetime import datetime
 import pandas as pd
@@ -32,6 +33,9 @@ from agent import (
     transcribe_audio_bytes,
     run_workspace_command,
     get_system_info,
+    run_gemini_agent, run_text_provider, choose_provider_chain,
+    DEFAULT_MODELS, OMNIAGENT_VERSION, transcribe_audio_bytes,
+    is_provider_error,
 )
 
 st.set_page_config(
@@ -55,7 +59,7 @@ st.markdown("""
 # ==========================================
 if "chat_messages" not in st.session_state:
     st.session_state.chat_messages = [
-        {"role": "assistant", "content": "👋 Greetings! I am **OmniAgent OS 3**. I can research the live web, write/test code, manage workspace files, automate development tasks, generate images/MP4s, and talk with you by voice."}
+        {"role": "assistant", "content": "👋 Greetings! I am **OmniAgent OS 4**. I can research the live web, work with code/files, automate development tasks, use multiple AI providers, and talk with you by voice."}
     ]
 if "image_history" not in st.session_state:
     st.session_state.image_history = []
@@ -102,35 +106,60 @@ def speak_browser(text: str, autoplay: bool = False, rate: float = 1.0):
 
 
 # ==========================================
-# SIDEBAR
+# SIDEBAR: MULTI-PROVIDER CONTROL CORE
 # ==========================================
 with st.sidebar:
     st.markdown("### ⚡ OmniAgent Control Core")
-    env_api_key = os.getenv("GEMINI_API_KEY", "")
-    api_key_input = st.text_input(
-        "Google Gemini API Key:",
-        value=env_api_key,
-        type="password",
-        help="Get your key from Google AI Studio.",
-    )
-    active_api_key = api_key_input.strip() if api_key_input else env_api_key
+    st.caption(f"OmniAgent OS {OMNIAGENT_VERSION} • Multi-Provider")
 
-    available_models = get_available_gemini_models(active_api_key)
-    preferred_order = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
-    default_idx = next((available_models.index(x) for x in preferred_order if x in available_models), 0)
-    model_choice = st.selectbox("Active Gemini Model Tier:", available_models, index=default_idx)
+    provider_mode = st.selectbox(
+        "🧠 AI Provider Mode",
+        ["Auto", "Gemini", "Hugging Face", "Groq", "OpenRouter", "Cohere", "LM Studio"],
+        index=0,
+        help="Auto tries Gemini first, then the configured fallbacks."
+    )
+
+    st.markdown("#### 🔑 API Keys & Connections")
+    env = os.getenv
+
+    gemini_key = st.text_input("🔵 Google Gemini API Key", value=env("GEMINI_API_KEY", ""), type="password")
+    hf_key = st.text_input("🟠 Hugging Face Token", value=env("HF_TOKEN", ""), type="password")
+    groq_key = st.text_input("🟣 Groq API Key", value=env("GROQ_API_KEY", ""), type="password")
+    openrouter_key = st.text_input("🟢 OpenRouter API Key", value=env("OPENROUTER_API_KEY", ""), type="password")
+    cohere_key = st.text_input("🟡 Cohere API Key", value=env("COHERE_API_KEY", ""), type="password")
+    lmstudio_url = st.text_input("⚫ LM Studio Base URL", value=env("LM_STUDIO_BASE_URL", "http://localhost:1234/v1"))
+
+    with st.expander("⚙️ Model Settings", expanded=True):
+        gemini_models = get_available_gemini_models(gemini_key)
+        gemini_model = st.selectbox("Gemini", gemini_models, index=min(
+            max(gemini_models.index("gemini-2.5-flash") if "gemini-2.5-flash" in gemini_models else 0, 0),
+            len(gemini_models)-1
+        ))
+        hf_model = st.text_input("Hugging Face Model", value=DEFAULT_MODELS["Hugging Face"])
+        groq_model = st.text_input("Groq Model", value=DEFAULT_MODELS["Groq"])
+        openrouter_model = st.text_input("OpenRouter Model", value=DEFAULT_MODELS["OpenRouter"])
+        cohere_model = st.text_input("Cohere Model", value=DEFAULT_MODELS["Cohere"])
+        lmstudio_model = st.text_input("LM Studio Model", value=DEFAULT_MODELS["LM Studio"])
+
+    provider_keys = {
+        "Gemini": gemini_key, "Hugging Face": hf_key, "Groq": groq_key,
+        "OpenRouter": openrouter_key, "Cohere": cohere_key,
+        "LM Studio": lmstudio_url,
+    }
+    configured = [p for p, k in provider_keys.items() if k]
+    st.caption("Configured: " + (", ".join(configured) if configured else "None"))
 
     st.markdown("---")
     st.markdown("#### 🗣️ Voice Assistant")
     st.session_state.voice_enabled = st.toggle("Enable voice replies", value=st.session_state.voice_enabled)
     st.session_state.voice_rate = st.slider("Voice speed", 0.7, 1.4, st.session_state.voice_rate, 0.05)
-    st.caption("Voice input uses the browser microphone recorder. Voice output uses browser-native speech synthesis.")
+    st.caption("Voice input: Gemini → Hugging Face fallback. Voice output: browser speech synthesis.")
 
     st.markdown("---")
     st.markdown("#### 🧠 Agent Capabilities")
     for badge in [
-        "Live Web", "Web Fetch", "Python Runner", "File Manager", "Copy/Move",
-        "Dev Commands", "Image Generator", "MP4 Generator", "Voice I/O"
+        "Gemini", "Hugging Face", "Groq", "OpenRouter", "Cohere", "LM Studio",
+        "Live Web", "Python", "Files", "Dev Commands", "Voice I/O"
     ]:
         st.markdown(f"<span class='tool-badge'>{badge}</span>", unsafe_allow_html=True)
 
@@ -152,11 +181,9 @@ with st.sidebar:
 
     zip_buffer = create_workspace_zip()
     st.download_button(
-        label="📦 Export Workspace ZIP",
-        data=zip_buffer,
+        "📦 Export Workspace ZIP", data=zip_buffer,
         file_name=f"workspace_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
-        mime="application/zip",
-        use_container_width=True,
+        mime="application/zip", use_container_width=True
     )
 
     if st.button("🗑️ Reset Workspace", use_container_width=True):
@@ -177,7 +204,7 @@ with st.sidebar:
 # ==========================================
 # HEADER
 # ==========================================
-st.markdown("<div class='main-header'>🤖 OmniAgent OS 3</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-header'>🤖 OmniAgent OS 4</div>", unsafe_allow_html=True)
 st.markdown(
     "<div class='sub-header'>Autonomous Agentic AI • Live Web • OpenClaw-style Workspace Automation • Code Runner • Voice Assistant • Image & MP4 Core</div>",
     unsafe_allow_html=True,
@@ -198,87 +225,126 @@ tab_chat, tab_code, tab_img, tab_video, tab_files = st.tabs([
 # TAB 1: CHAT + VOICE
 # ==========================================
 with tab_chat:
-    st.caption("OmniAgent can plan and chain actions across web research, code, files and development commands instead of stopping after one response.")
+    st.caption("One interface for multi-provider AI, live web research, code, files, automation and voice.")
 
-    # Display conversation. Use a speak control for assistant messages.
     for idx, msg in enumerate(st.session_state.chat_messages):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
             if msg["role"] == "assistant" and st.session_state.voice_enabled:
                 speak_browser(msg["content"], autoplay=False, rate=st.session_state.voice_rate)
 
-    st.markdown("<div class='voice-card'><b>🎙️ Voice Input</b><br>Record a question and OmniAgent will transcribe it, then run the same autonomous agent workflow.</div>", unsafe_allow_html=True)
-    voice_audio = None
-    if hasattr(st, "audio_input"):
-        voice_audio = st.audio_input("Press record and speak to OmniAgent", key="voice_recorder")
+    st.markdown(
+        "<div class='voice-card'><b>🎙️ Voice Input</b><br>Record a question and OmniAgent will transcribe it, then route it through the same agent workflow.</div>",
+        unsafe_allow_html=True
+    )
 
+    voice_audio = st.audio_input("Press record and speak to OmniAgent", key="voice_recorder") if hasattr(st, "audio_input") else None
     voice_col1, voice_col2 = st.columns([3, 1])
     with voice_col1:
-        user_prompt = st.chat_input("Ask a question, request web research, or trigger code/file/automation tasks...")
+        user_prompt = st.chat_input("Ask a question, research the web, build code, edit files, or automate a task...")
     with voice_col2:
         process_voice = st.button("🎙️ Use Voice", use_container_width=True)
 
     voice_prompt = ""
     if process_voice and voice_audio:
-        if not active_api_key:
-            st.error("⚠️ Add a Gemini API key to use voice transcription.")
-        else:
-            with st.spinner("🎧 Transcribing your voice..."):
-                try:
-                    voice_prompt = transcribe_audio_bytes(voice_audio.getvalue(), active_api_key)
-                    if voice_prompt:
-                        st.success(f"Heard: {voice_prompt}")
-                except Exception as exc:
-                    st.error(f"Voice transcription error: {exc}")
-    elif process_voice and not voice_audio:
+        with st.spinner("🎧 Transcribing..."):
+            try:
+                voice_prompt = transcribe_audio_bytes(
+                    voice_audio.getvalue(),
+                    api_key=gemini_key,
+                    hf_token=hf_key,
+                    provider_mode=provider_mode,
+                    hf_model="openai/whisper-large-v3-turbo",
+                )
+                st.success(f"Heard: {voice_prompt}")
+            except Exception as exc:
+                st.error(f"Voice transcription error: {exc}")
+    elif process_voice:
         st.info("Record a voice message first.")
 
     effective_prompt = voice_prompt or user_prompt
 
     if effective_prompt:
-        if not active_api_key:
-            st.error("⚠️ Please provide a Gemini API Key in the sidebar.")
-        else:
-            st.session_state.chat_messages.append({"role": "user", "content": effective_prompt})
-            with st.chat_message("user"):
-                st.markdown(effective_prompt)
+        st.session_state.chat_messages.append({"role": "user", "content": effective_prompt})
+        with st.chat_message("user"):
+            st.markdown(effective_prompt)
 
-            with st.chat_message("assistant"):
-                message_placeholder = st.empty()
-                status_placeholder = st.empty()
-                try:
-                    with st.spinner("🤖 OmniAgent is reasoning, using tools, and completing the task..."):
-                        agent_model, active_model_used = initialize_agent_model(active_api_key, model_choice)
-                        st.session_state.last_agent_model = active_model_used
+        with st.chat_message("assistant"):
+            placeholder = st.empty()
+            status = st.empty()
+            try:
+                # Current/news requests get live context before fallback providers are used.
+                web_context = ""
+                if re.search(r"\b(latest|news|today|recent|breaking|headlines|update|updates)\b", effective_prompt, re.I):
+                    web_context = web_search(effective_prompt, max_results=6)
 
-                        # Correct Gemini history format; do not mutate chat.history with ad-hoc dicts.
-                        recent_history = []
-                        for past_msg in st.session_state.chat_messages[:-1][-8:]:
-                            recent_history.append({
-                                "role": "user" if past_msg["role"] == "user" else "model",
-                                "parts": [past_msg["content"]],
-                            })
+                provider_keys = {
+                    "Gemini": gemini_key,
+                    "Hugging Face": hf_key,
+                    "Groq": groq_key,
+                    "OpenRouter": openrouter_key,
+                    "Cohere": cohere_key,
+                    "LM Studio": lmstudio_url,
+                }
+                chain = choose_provider_chain(provider_mode, provider_keys)
+                if not chain:
+                    raise RuntimeError("No configured provider for the selected mode. Add an API key or select Auto.")
 
-                        chat = agent_model.start_chat(
-                            history=recent_history,
-                            enable_automatic_function_calling=True,
-                        )
-                        response = chat.send_message(effective_prompt)
-                        response_text = (response.text or "").strip()
-                        if not response_text:
-                            response_text = "✅ Task completed, but the model returned no final text. Check the workspace for generated files."
+                model_map = {
+                    "Gemini": gemini_model,
+                    "Hugging Face": hf_model,
+                    "Groq": groq_model,
+                    "OpenRouter": openrouter_model,
+                    "Cohere": cohere_model,
+                    "LM Studio": lmstudio_model,
+                }
 
-                        message_placeholder.markdown(response_text)
-                        st.session_state.chat_messages.append({"role": "assistant", "content": response_text})
-                        status_placeholder.success(f"Completed with {active_model_used} • tools enabled")
+                history = st.session_state.chat_messages[:-1]
+                result_text = ""
+                used_provider = None
+                errors = []
 
-                        if st.session_state.voice_enabled:
-                            speak_browser(response_text, autoplay=False, rate=st.session_state.voice_rate)
-                except Exception as e:
-                    err_msg = f"⚠️ **Agent Error:** {type(e).__name__}: {e}"
-                    message_placeholder.markdown(err_msg)
-                    st.session_state.chat_messages.append({"role": "assistant", "content": err_msg})
-                    status_placeholder.error("The agent stopped because of a runtime error. Existing workspace changes, if any, are preserved.")
+                with st.spinner("🤖 OmniAgent is routing and completing the task..."):
+                    for provider in chain:
+                        try:
+                            if provider == "Gemini":
+                                result_text, used_model = run_gemini_agent(
+                                    gemini_key, gemini_model, history, effective_prompt, web_context
+                                )
+                            else:
+                                result_text, used_model = run_text_provider(
+                                    provider,
+                                    provider_keys[provider],
+                                    model_map[provider],
+                                    history,
+                                    effective_prompt,
+                                    web_context,
+                                    lmstudio_url=lmstudio_url,
+                                )
+                            if result_text:
+                                used_provider = provider
+                                st.session_state.last_agent_model = used_model
+                                break
+                        except Exception as exc:
+                            errors.append(f"{provider}: {type(exc).__name__}: {exc}")
+                            if provider_mode != "Auto":
+                                raise
+                            continue
+
+                if not result_text:
+                    raise RuntimeError("All configured providers failed.\n" + "\n".join(errors))
+
+                placeholder.markdown(result_text)
+                st.session_state.chat_messages.append({"role": "assistant", "content": result_text})
+                status.success(f"Completed with {used_provider} • {st.session_state.last_agent_model}")
+                if st.session_state.voice_enabled:
+                    speak_browser(result_text, autoplay=False, rate=st.session_state.voice_rate)
+
+            except Exception as e:
+                err = f"⚠️ **Agent Error:** {type(e).__name__}: {e}"
+                placeholder.markdown(err)
+                st.session_state.chat_messages.append({"role": "assistant", "content": err})
+                status.error("The request failed. In Auto mode OmniAgent will use another configured provider when possible.")
 
 # ==========================================
 # TAB 2: CODE STUDIO

@@ -604,87 +604,186 @@ def transcribe_audio_bytes(audio_bytes: bytes, api_key: str, mime_type: str = "a
     raise RuntimeError(f"Voice transcription failed: {last_error}")
 
 
+
 # ==========================================
-# DYNAMIC GEMINI MODEL RESOLUTION & AGENT BRAIN
+# MULTI-PROVIDER MODEL ROUTER
 # ==========================================
+OMNIAGENT_VERSION = "4.1"
+
 AGENT_SYSTEM_PROMPT = """
-You are OmniAgent OS 3, an autonomous AI work assistant inspired by agentic desktop assistants.
+You are OmniAgent OS 4, an autonomous AI work assistant.
 
 You can:
-1. Research the live web (`web_search`) and fetch pages (`web_fetch`).
-2. Execute Python in the workspace sandbox (`execute_python_code`).
+1. Research the live web and fetch pages.
+2. Execute Python in the workspace.
 3. Create, read, edit, search, copy, move and delete workspace files.
-4. Run allowlisted development/system commands inside the workspace (`run_workspace_command`).
-5. Inspect runtime information (`get_system_info`).
+4. Run allowlisted development commands inside the workspace.
+5. Inspect runtime information.
 6. Generate images and MP4 video scenes.
 
 OPERATING RULES:
 - Act, don't just explain. When the user asks you to build, edit, test, research, organize, calculate or create something, use the relevant tools proactively.
-- You may chain multiple tools. For example: inspect files -> edit files -> run tests -> inspect errors -> fix -> run tests again.
-- For current/latest/news questions, use `web_search` before answering. If one provider fails, continue with the fallback results returned by the tool. Never invent current facts.
-- Treat WEB_SEARCH_UNAVAILABLE as a real limitation; do not fabricate sources.
-- When generating code, write it into the workspace when that is useful and run a validation/test command when possible.
-- When a tool returns an error, diagnose it and try a sensible alternative tool or fix instead of immediately giving up.
-- Be concise in chat but report what you actually did and any remaining limitations.
-- Do not claim to control the user's personal computer, browser, or external accounts. You operate inside the Streamlit server/runtime and its workspace.
+- You may chain multiple tools: inspect -> edit -> test -> diagnose -> fix -> retest.
+- For current/latest/news questions, use live web search before answering. Never invent current facts.
+- When using fallback providers without native local tool execution, use supplied web/file context faithfully and do not pretend that a remote model executed local tools.
+- If one model provider is unavailable, the application may route the request to another configured provider.
+- Be concise but report what was actually done.
 """.strip()
 
-
 AVAILABLE_TOOLS = [
-    web_search,
-    web_fetch,
-    execute_python_code,
-    fs_write_file,
-    fs_read_file,
-    fs_list_files,
-    fs_create_directory,
-    fs_delete_path,
-    fs_copy_path,
-    fs_move_path,
-    fs_path_exists,
-    fs_search_files,
-    run_workspace_command,
-    get_system_info,
+    web_search, web_fetch, execute_python_code,
+    fs_write_file, fs_read_file, fs_list_files, fs_create_directory,
+    fs_delete_path, fs_copy_path, fs_move_path, fs_path_exists,
+    fs_search_files, run_workspace_command, get_system_info,
     generate_image_url,
 ]
 
+DEFAULT_MODELS = {
+    "Gemini": "gemini-2.5-flash",
+    "Hugging Face": "meta-llama/Llama-3.2-3B-Instruct",
+    "Groq": "openai/gpt-oss-120b",
+    "OpenRouter": "openrouter/free",
+    "Cohere": "command-a-plus-05-2026",
+    "LM Studio": "local-model",
+}
+
+def is_provider_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    needles = [
+        "429", "quota", "rate limit", "rate_limit", "resource exhausted",
+        "too many requests", "unauthorized", "401", "403", "timeout",
+        "temporarily unavailable", "service unavailable", "not found"
+    ]
+    return any(n in text for n in needles)
+
+def safe_response_text(response) -> str:
+    """Extract only text parts from a Gemini response. Never stringify a function_call part."""
+    try:
+        value = getattr(response, "text", None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    except Exception:
+        pass
+
+    texts = []
+    try:
+        candidates = getattr(response, "candidates", None) or []
+        for candidate in candidates:
+            content = getattr(candidate, "content", None)
+            parts = getattr(content, "parts", None) or []
+            for part in parts:
+                txt = getattr(part, "text", None)
+                if isinstance(txt, str) and txt.strip():
+                    texts.append(txt.strip())
+    except Exception:
+        pass
+    return "\n\n".join(texts).strip()
+
+def build_context_prompt(history, user_prompt, web_context=None):
+    recent = history[-8:] if history else []
+    lines = ["RECENT CONVERSATION:"]
+    for m in recent:
+        role = m.get("role", "user").upper()
+        lines.append(f"{role}: {m.get('content', '')}")
+    if web_context:
+        lines.append("\nLIVE WEB CONTEXT:")
+        lines.append(web_context)
+    lines.append("\nCURRENT USER REQUEST:")
+    lines.append(user_prompt)
+    return "\n".join(lines)
+
+def _http_json(url, headers, payload, timeout=45):
+    resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    if resp.status_code >= 400:
+        try:
+            body = resp.json()
+        except Exception:
+            body = resp.text[:2000]
+        raise RuntimeError(f"HTTP {resp.status_code}: {body}")
+    return resp.json()
+
+def call_hf(api_key, model, messages):
+    try:
+        from huggingface_hub import InferenceClient
+    except Exception as exc:
+        raise RuntimeError("huggingface_hub is not installed. Run pip install -r requirements.txt") from exc
+    client = InferenceClient(api_key=api_key)
+    out = client.chat.completions.create(model=model, messages=messages, max_tokens=2048)
+    content = getattr(out.choices[0].message, "content", "") if out and out.choices else ""
+    if isinstance(content, list):
+        content = " ".join(
+            str(x.get("text", "")) if isinstance(x, dict) else str(getattr(x, "text", ""))
+            for x in content
+        )
+    return str(content or "").strip()
+
+def call_groq(api_key, model, messages):
+    data = _http_json(
+        "https://api.groq.com/openai/v1/chat/completions",
+        {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        {"model": model, "messages": messages, "temperature": 0.2, "max_tokens": 2048},
+    )
+    return (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+
+def call_openrouter(api_key, model, messages):
+    data = _http_json(
+        "https://openrouter.ai/api/v1/chat/completions",
+        {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://streamlit.io",
+            "X-OpenRouter-Title": "OmniAgent OS",
+        },
+        {"model": model, "messages": messages, "temperature": 0.2, "max_tokens": 2048},
+    )
+    return (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+
+def call_cohere(api_key, model, messages):
+    data = _http_json(
+        "https://api.cohere.com/v2/chat",
+        {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        {"model": model, "messages": messages, "temperature": 0.2, "max_tokens": 2048},
+    )
+    content = data.get("message", {}).get("content", [])
+    texts = []
+    for item in content:
+        if isinstance(item, dict) and item.get("type") == "text":
+            texts.append(item.get("text", ""))
+    return "\n".join(texts).strip()
+
+def call_lmstudio(base_url, model, messages):
+    url = base_url.rstrip("/") + "/chat/completions"
+    data = _http_json(
+        url,
+        {"Content-Type": "application/json"},
+        {"model": model, "messages": messages, "temperature": 0.2, "max_tokens": 2048},
+    )
+    return (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
 
 def get_available_gemini_models(api_key: str) -> List[str]:
-    default_models = [
-        "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-1.5-pro",
-    ]
+    default_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
     if not api_key:
         return default_models
     try:
         genai.configure(api_key=api_key)
         discovered = []
         for m in genai.list_models():
-            if "generateContent" in getattr(m, "supported_generation_methods", []):
+            methods = getattr(m, "supported_generation_methods", [])
+            if "generateContent" in methods:
                 discovered.append(m.name.replace("models/", ""))
-        return discovered if discovered else default_models
+        return discovered or default_models
     except Exception:
         return default_models
 
-
 def initialize_agent_model(api_key: str, preferred_model: str = "gemini-2.5-flash"):
-    """Initializes Gemini with automatic tool calling and model fallback."""
     if not api_key:
         raise ValueError("Gemini API key is missing.")
     genai.configure(api_key=api_key)
-    clean_pref = preferred_model.replace("models/", "")
     candidates = list(dict.fromkeys([
-        clean_pref,
-        "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-1.5-flash-latest",
-        "gemini-1.5-pro",
-        "gemini-1.5-flash-8b",
+        preferred_model.replace("models/", ""),
+        "gemini-2.5-flash", "gemini-2.0-flash",
+        "gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.5-flash-8b",
     ]))
-
     last_error = None
     for cand in candidates:
         try:
@@ -697,3 +796,90 @@ def initialize_agent_model(api_key: str, preferred_model: str = "gemini-2.5-flas
         except Exception as err:
             last_error = err
     raise last_error or RuntimeError("No compatible Gemini model was found.")
+
+def run_gemini_agent(api_key, model_name, history, user_prompt, web_context=""):
+    model, active_model = initialize_agent_model(api_key, model_name)
+    prompt = build_context_prompt(history, user_prompt, web_context)
+    chat = model.start_chat(enable_automatic_function_calling=True)
+    response = chat.send_message(prompt)
+    text = safe_response_text(response)
+    if text:
+        return text, active_model
+    # If the SDK surfaced only non-text parts, ask the same model for a clean final response.
+    recovery = model.generate_content(
+        "Return a concise final user-facing answer based on the completed work. "
+        "Do not output tool-call objects or internal protocol.\n\n" + prompt
+    )
+    recovered = safe_response_text(recovery)
+    if recovered:
+        return recovered, active_model
+    return "✅ Task completed. Check the workspace for generated files/results.", active_model
+
+def run_text_provider(provider, api_key, model, history, user_prompt, web_context="", lmstudio_url="http://localhost:1234/v1"):
+    messages = [{"role": "system", "content": AGENT_SYSTEM_PROMPT}]
+    for m in (history or [])[-8:]:
+        role = "assistant" if m.get("role") == "assistant" else "user"
+        messages.append({"role": role, "content": m.get("content", "")})
+    if web_context:
+        messages.append({
+            "role": "system",
+            "content": "Live web context retrieved by OmniAgent:\n" + web_context
+        })
+    messages.append({"role": "user", "content": user_prompt})
+
+    if provider == "Hugging Face":
+        return call_hf(api_key, model, messages), model
+    if provider == "Groq":
+        return call_groq(api_key, model, messages), model
+    if provider == "OpenRouter":
+        return call_openrouter(api_key, model, messages), model
+    if provider == "Cohere":
+        return call_cohere(api_key, model, messages), model
+    if provider == "LM Studio":
+        return call_lmstudio(lmstudio_url, model, messages), model
+    raise ValueError(f"Unsupported provider: {provider}")
+
+def choose_provider_chain(mode, keys):
+    configured = {k for k, v in keys.items() if v}
+    if mode == "Auto":
+        order = ["Gemini", "Hugging Face", "Groq", "OpenRouter", "Cohere", "LM Studio"]
+        return [p for p in order if p in configured]
+    return [mode] if mode == "LM Studio" or mode in configured else []
+
+def transcribe_audio_bytes(audio_bytes: bytes, api_key: str = "", mime_type: str = "audio/wav",
+                           hf_token: str = "", provider_mode: str = "Auto",
+                           hf_model: str = "openai/whisper-large-v3-turbo") -> str:
+    """Transcribe audio with Gemini first, then Hugging Face ASR fallback."""
+    if not audio_bytes:
+        return ""
+    errors = []
+    if api_key and provider_mode in {"Auto", "Gemini"}:
+        try:
+            genai.configure(api_key=api_key)
+            for model_name in ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"]:
+                try:
+                    model = genai.GenerativeModel(model_name)
+                    response = model.generate_content([
+                        "Transcribe the user's speech exactly. Return only the transcript.",
+                        {"mime_type": mime_type, "data": audio_bytes},
+                    ])
+                    text = safe_response_text(response)
+                    if text:
+                        return text
+                except Exception as exc:
+                    errors.append(str(exc))
+        except Exception as exc:
+            errors.append(str(exc))
+
+    if hf_token and provider_mode in {"Auto", "Hugging Face"}:
+        try:
+            from huggingface_hub import InferenceClient
+            client = InferenceClient(api_key=hf_token)
+            result = client.automatic_speech_recognition(audio_bytes, model=hf_model)
+            text = getattr(result, "text", "") or ""
+            if text.strip():
+                return text.strip()
+        except Exception as exc:
+            errors.append(str(exc))
+    raise RuntimeError("Voice transcription failed. " + " | ".join(errors[-3:]))
+
