@@ -24,11 +24,12 @@ def run_agent_chat(prompt: str, api_key: str) -> str:
         return "⚠️ Error: Please provide a Gemini API Key in the sidebar to use Chat or Search."
         
     try:
-        # Configure the free Gemini cloud engine
+        # Secure configuration parameters
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('models/gemini-1.5-flash')
         
-        # Simple keywords to trigger the web search tool automatically
+        # FIX: Explicit model target mapping format bypasses v1beta strict namespace checks
+        model = genai.GenerativeModel(model_name='gemini-1.5-flash')
+        
         search_triggers = ["search", "latest", "news", "weather", "current", "who is", "what is the price"]
         if any(word in prompt.lower() for word in search_triggers):
             search_data = web_search(prompt)
@@ -42,12 +43,14 @@ def run_agent_chat(prompt: str, api_key: str) -> str:
         return f"AI Brain Error: {str(e)}"
 
 def generate_image_url(prompt: str) -> str:
-    """Creates a free public URL string to render AI artwork instantly."""
-    encoded_prompt = prompt.replace(" ", "%20")
-    return f"https://pollinations.ai{encoded_prompt}?width=1024&height=1024&seed=77"
+    """Creates a clean web query string to pull free AI illustrations safely."""
+    # Strips special characters breaking URL queries
+    clean_prompt = "".join(c for c in prompt if c.isalnum() or c.isspace()).strip()
+    encoded_prompt = clean_prompt.replace(" ", "%20")
+    return f"https://pollinations.ai{encoded_prompt}?width=1024&height=1024&seed=88"
 
 def generate_video_url(prompt: str) -> str:
-    """Creates a free video rendering endpoint generation link."""
-    encoded_prompt = prompt.replace(" ", "%20")
-    # Utilizing free video rendering fallback architecture
-    return f"https://pollinations.ai{encoded_prompt}?width=512&height=512&feed=true"
+    """Creates a video frame query string to pull motion visuals safely."""
+    clean_prompt = "".join(c for c in prompt if c.isalnum() or c.isspace()).strip()
+    encoded_prompt = clean_prompt.replace(" ", "%20")
+    return f"https://pollinations.ai{encoded_prompt}?width=512&height=512&enhance=true"
