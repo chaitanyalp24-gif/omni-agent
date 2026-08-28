@@ -48,7 +48,8 @@ with tab2:
         if img_prompt:
             with st.spinner("Rendering artwork in cloud space..."):
                 final_img = generate_image_url(img_prompt)
-                st.image(final_img, caption=f"Result for: '{img_prompt}'", use_column_width=True)
+                st.image(final_img, caption=f"Result for: '{img_prompt}'", width="stretch")
+
         else:
             st.warning("Please describe an image first.")
 
@@ -61,7 +62,8 @@ with tab3:
             with st.spinner("Processing cloud video stream cycles..."):
                 final_vid = generate_video_url(vid_prompt)
                 st.write("🎥 Your generated live motion visual preview:")
-                st.image(final_vid, caption="Rendered Motion Sequence", use_column_width=True)
+                st.image(final_vid, caption="Rendered Motion Sequence", width="stretch")
+
         else:
             st.warning("Please describe a motion graphic first.")
 

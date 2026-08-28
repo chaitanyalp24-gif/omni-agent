@@ -26,7 +26,7 @@ def run_agent_chat(prompt: str, api_key: str) -> str:
     try:
         # Configure the free Gemini cloud engine
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('models/gemini-1.5-flash')
         
         # Simple keywords to trigger the web search tool automatically
         search_triggers = ["search", "latest", "news", "weather", "current", "who is", "what is the price"]
