@@ -7,6 +7,8 @@ import pandas as pd
 
 from agent import (
     WORKSPACE_DIR,
+    VIDEOS_DIR,
+    get_available_gemini_models,
     initialize_agent_model,
     web_search,
     execute_python_code,
@@ -18,7 +20,7 @@ from agent import (
     fs_search_files,
     create_workspace_zip,
     generate_image_url,
-    generate_video_url,
+    synthesize_ai_video,
     download_media_bytes,
     enhance_prompt_with_gemini
 )
@@ -31,57 +33,61 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom Styling
+# Styling
 st.markdown("""
 <style>
     .main-header { font-size: 2.2rem; font-weight: 800; color: #1E88E5; margin-bottom: 0px; }
     .sub-header { font-size: 1.05rem; color: #555; margin-bottom: 20px; }
-    .metric-card { background: #f8f9fa; border: 1px solid #e0e0e0; border-radius: 8px; padding: 15px; }
-    .stCodeBlock { border-radius: 8px !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# Initialize Session State
+# Session State Initialization
 if "chat_messages" not in st.session_state:
     st.session_state.chat_messages = [
-        {"role": "assistant", "content": "👋 Greetings! I am **OmniAgent OS**. I can research the web, write & run Python code, manage your workspace files, and generate images & motion videos. How can I help you today?"}
+        {"role": "assistant", "content": "👋 Greetings! I am **OmniAgent OS**. I can research the live web, execute Python code, manage files, and generate high-resolution images & real MP4 videos."}
     ]
-if "chat_session" not in st.session_state:
-    st.session_state.chat_session = None
 if "image_history" not in st.session_state:
     st.session_state.image_history = []
+if "video_history" not in st.session_state:
+    st.session_state.video_history = []
 
 # ==========================================
-# SIDEBAR: SETTINGS & WORKSPACE STATUS
+# SIDEBAR: SETTINGS & DYNAMIC MODELS
 # ==========================================
 with st.sidebar:
     st.markdown("### ⚡ OmniAgent Control Core")
     
-    # API Key Configuration
     env_api_key = os.getenv("GEMINI_API_KEY", "")
     api_key_input = st.text_input(
         "Google Gemini API Key:",
         value=env_api_key,
         type="password",
-        help="Get a free key from https://aistudio.google.com"
+        help="Get your key at https://aistudio.google.com"
     )
     active_api_key = api_key_input.strip() if api_key_input else env_api_key
 
+    # Dynamically fetch models valid for this specific key
+    available_models = get_available_gemini_models(active_api_key)
+    
+    # Set smart default index
+    default_idx = 0
+    for target in ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-latest"]:
+        if target in available_models:
+            default_idx = available_models.index(target)
+            break
+
     model_choice = st.selectbox(
-        "LLM Brain Tier:",
-        ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash"],
-        index=0
+        "Active Gemini Model Tier:",
+        available_models,
+        index=default_idx
     )
 
     st.markdown("---")
-    st.markdown("#### 📂 Workspace Live Telemetry")
+    st.markdown("#### 📂 Workspace Telemetry")
     
-    # Count files and folders
     file_count = 0
-    folder_count = 0
     total_size = 0
     for root, dirs, files in os.walk(WORKSPACE_DIR):
-        folder_count += len(dirs)
         file_count += len(files)
         for f in files:
             fp = os.path.join(root, f)
@@ -93,9 +99,9 @@ with st.sidebar:
 
     zip_buffer = create_workspace_zip()
     st.download_button(
-        label="📦 Download Workspace ZIP",
+        label="📦 Export Workspace ZIP",
         data=zip_buffer,
-        file_name=f"workspace_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+        file_name=f"workspace_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
         mime="application/zip",
         use_container_width=True
     )
@@ -107,24 +113,24 @@ with st.sidebar:
                 os.remove(item_path)
             elif os.path.isdir(item_path):
                 shutil.rmtree(item_path)
-        st.success("Workspace wiped clean.")
+        os.makedirs(VIDEOS_DIR, exist_ok=True)
+        st.success("Workspace reset.")
         st.rerun()
 
     st.markdown("---")
-    st.markdown("#### 💳 Monetization & Pro Links")
     st.link_button("☕ Support Developer ($3)", "https://buymeacoffee.com", use_container_width=True)
-    st.link_button("🚀 Upgrade to OmniAgent Pro", "https://stripe.com", use_container_width=True)
+    st.link_button("🚀 Upgrade to Pro", "https://stripe.com", use_container_width=True)
 
-# Main Title Header
+# Main Title
 st.markdown("<div class='main-header'>🤖 OmniAgent OS</div>", unsafe_allow_html=True)
-st.markdown("<div class='sub-header'>Full-Stack Autonomous Agentic AI • Web Search • Code Runner • File Hub • Media Studio</div>", unsafe_allow_html=True)
+st.markdown("<div class='sub-header'>Autonomous Agentic AI • Web Search • Sandbox Runner • OpenClaw File System • Image & MP4 Video Core</div>", unsafe_allow_html=True)
 
 # Application Tabs
 tab_chat, tab_code, tab_img, tab_video, tab_files = st.tabs([
     "💬 Autonomous Agent Chat",
     "💻 Code Studio & Runner",
     "🎨 AI Image Studio",
-    "🎬 Video & Motion Core",
+    "🎬 MP4 Video Core",
     "📂 OpenClaw Workspace"
 ])
 
@@ -132,41 +138,33 @@ tab_chat, tab_code, tab_img, tab_video, tab_files = st.tabs([
 # TAB 1: AUTONOMOUS AGENT CHAT
 # ==========================================
 with tab_chat:
-    st.caption("OmniAgent can autonomously search the web, execute code in the sandbox, and create workspace files.")
+    st.caption("OmniAgent autonomously queries the live web, executes sandbox code, and manages workspace files.")
     
-    # Display Chat History
     for msg in st.session_state.chat_messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # Chat Input Box
-    user_prompt = st.chat_input("Ask OmniAgent anything, e.g. 'Search for recent NASA discoveries and write a report to nasa_news.md'...")
+    user_prompt = st.chat_input("Ask a question, request web research, or trigger code/file tasks...")
 
     if user_prompt:
         if not active_api_key:
-            st.error("⚠️ Please provide a valid Gemini API Key in the sidebar.")
+            st.error("⚠️ Please provide a Gemini API Key in the sidebar.")
         else:
-            # Append User Message
             st.session_state.chat_messages.append({"role": "user", "content": user_prompt})
             with st.chat_message("user"):
                 st.markdown(user_prompt)
 
-            # Generate Agent Response
             with st.chat_message("assistant"):
                 message_placeholder = st.empty()
                 with st.spinner("🤖 OmniAgent is reasoning and orchestrating tools..."):
                     try:
-                        agent_model = initialize_agent_model(active_api_key, model_choice)
-                        
-                        # Enable Automatic Function Calling
+                        agent_model, active_model_used = initialize_agent_model(active_api_key, model_choice)
                         chat = agent_model.start_chat(enable_automatic_function_calling=True)
                         
-                        # Replay recent conversation context
+                        # Replay recent context safely
                         for past_msg in st.session_state.chat_messages[-6:-1]:
-                            if past_msg["role"] == "user":
-                                chat.history.append({"role": "user", "parts": [past_msg["content"]]})
-                            elif past_msg["role"] == "assistant":
-                                chat.history.append({"role": "model", "parts": [past_msg["content"]]})
+                            role_tag = "user" if past_msg["role"] == "user" else "model"
+                            chat.history.append({"role": role_tag, "parts": [past_msg["content"]]})
 
                         response = chat.send_message(user_prompt)
                         response_text = response.text
@@ -179,12 +177,10 @@ with tab_chat:
                         st.session_state.chat_messages.append({"role": "assistant", "content": err_msg})
 
 # ==========================================
-# TAB 2: CODE STUDIO & SANDBOX EXECUTION
+# TAB 2: CODE STUDIO & SANDBOX RUNNER
 # ==========================================
 with tab_code:
     st.subheader("💻 Interactive Code Studio & Python Sandbox")
-    st.caption("Write, execute, and verify code live inside the isolated workspace sandbox environment.")
-
     col_code_left, col_code_right = st.columns([1, 1])
 
     with col_code_left:
@@ -192,21 +188,20 @@ with tab_code:
         default_py = '''import matplotlib.pyplot as plt
 import numpy as np
 
-# Generate sample data
+# Generate sample visual data
 x = np.linspace(0, 10, 100)
-y = np.sin(x)
+y = np.sin(x) * np.exp(-0.1 * x)
 
-# Create visualization
 plt.figure(figsize=(8, 4))
-plt.plot(x, y, label='Sine Wave', color='dodgerblue', lw=2)
-plt.title('Autonomous Code Execution Plot')
-plt.xlabel('X Axis')
-plt.ylabel('Y Axis')
-plt.grid(True, linestyle='--', alpha=0.6)
+plt.plot(x, y, label='Damped Wave', color='#1E88E5', lw=2.5)
+plt.title('Autonomous Code Execution Waveform')
+plt.xlabel('Time (s)')
+plt.ylabel('Amplitude')
+plt.grid(True, linestyle='--', alpha=0.5)
 plt.legend()
 plt.tight_layout()
 
-print("Execution finished successfully! Plot generated.")
+print("Execution completed! Visualization rendered.")
 '''
         code_input = st.text_area("Python Script", value=default_py, height=320, key="sandbox_code")
 
@@ -220,42 +215,40 @@ print("Execution finished successfully! Plot generated.")
             st.success(res)
 
     with col_code_right:
-        st.markdown("##### 🖥️ Execution Console & Visual Output")
+        st.markdown("##### 🖥️ Execution Console")
         if run_btn:
-            with st.spinner("Executing Python script in sandbox..."):
+            with st.spinner("Running Python script in sandbox..."):
                 exec_result = execute_python_code(code_input)
                 
                 if exec_result["stdout"]:
-                    st.markdown("**Output (stdout):**")
+                    st.markdown("**Console Output:**")
                     st.code(exec_result["stdout"], language="text")
                 
                 if exec_result["stderr"]:
-                    st.markdown("**Errors (stderr):**")
+                    st.markdown("**Errors:**")
                     st.error(exec_result["stderr"])
 
                 if exec_result["has_plots"]:
-                    st.markdown("**Rendered Matplotlib Figures:**")
+                    st.markdown("**Generated Visual Charts:**")
                     for fig in exec_result["plot_figures"]:
                         st.pyplot(fig)
         else:
-            st.info("Click '▶️ Run Code' to execute the script and observe outputs here.")
+            st.info("Click '▶️ Run Code' to execute Python in the isolated workspace.")
 
 # ==========================================
 # TAB 3: AI IMAGE STUDIO
 # ==========================================
 with tab_img:
     st.subheader("🎨 Generative AI Image Studio")
-    st.caption("Powered by high-detail diffusion models with automatic prompt enhancement.")
-
     img_col1, img_col2 = st.columns([1, 1])
 
     with img_col1:
-        img_prompt_input = st.text_area("Image Prompt Description:", placeholder="e.g., A futuristic cyberpunk hacker lab with neon monitors, 8k resolution, cinematic lighting", height=120)
+        img_prompt_input = st.text_area("Image Prompt:", placeholder="e.g., A cybernetic astronaut exploring an illuminated bioluminescent cave, 8k, cinematic lighting", height=120)
         
         opt1, opt2, opt3 = st.columns(3)
         aspect = opt1.selectbox("Aspect Ratio", ["1:1 (Square)", "16:9 (Landscape)", "9:16 (Portrait)"])
-        model_type = opt2.selectbox("Model", ["flux", "turbo"])
-        custom_seed = opt3.number_input("Seed (Optional)", min_value=0, max_value=999999, value=0)
+        model_type = opt2.selectbox("Diffusion Model", ["flux", "turbo"])
+        custom_seed = opt3.number_input("Seed (0 for random)", min_value=0, max_value=999999, value=0)
 
         dim_map = {
             "1:1 (Square)": (1024, 1024),
@@ -270,84 +263,90 @@ with tab_img:
 
         if enhance_btn:
             if img_prompt_input and active_api_key:
-                with st.spinner("Enhancing prompt with Gemini..."):
+                with st.spinner("Refining prompt with Gemini..."):
                     enhanced = enhance_prompt_with_gemini(img_prompt_input, active_api_key, "image")
                     st.success("Prompt Enhanced!")
                     img_prompt_input = enhanced
-                    st.text_area("Enhanced Version", value=enhanced, height=80)
+                    st.text_area("Refined Prompt", value=enhanced, height=80)
             else:
                 st.warning("Please provide a prompt and Gemini API Key.")
 
     with img_col2:
         if generate_img_btn and img_prompt_input:
-            with st.spinner("Generating ultra-res image..."):
+            with st.spinner("Rendering artwork..."):
                 seed_val = None if custom_seed == 0 else custom_seed
                 image_url = generate_image_url(img_prompt_input, width=w, height=h, seed=seed_val, model=model_type)
                 
                 st.image(image_url, caption=f"Prompt: {img_prompt_input}", use_container_width=True)
-                
                 img_bytes = download_media_bytes(image_url)
                 if img_bytes:
                     st.download_button(
                         "📥 Download Full-Res Image",
                         data=img_bytes,
-                        file_name=f"generated_art_{int(time.time())}.jpg",
+                        file_name=f"art_{int(time.time())}.jpg",
                         mime="image/jpeg",
                         use_container_width=True
                     )
-                    st.session_state.image_history.append({"url": image_url, "prompt": img_prompt_input})
         else:
-            st.info("Describe your desired image on the left and click 'Render Artwork'.")
+            st.info("Enter an image description and click 'Render Artwork'.")
 
 # ==========================================
-# TAB 4: VIDEO & MOTION CORE
+# TAB 4: REAL MP4 VIDEO CORE
 # ==========================================
 with tab_video:
-    st.subheader("🎬 AI Video & Dynamic Motion Studio")
-    st.caption("Generate high-speed motion graphic loops, cinematic visuals, and animated sequences.")
+    st.subheader("🎬 Generative MP4 Video Core")
+    st.caption("Synthesizes genuine MP4 video files with dynamic cinematic camera trajectories.")
 
     vid_col1, vid_col2 = st.columns([1, 1])
 
     with vid_col1:
-        vid_prompt_input = st.text_area("Motion Prompt Description:", placeholder="e.g., A rotating golden holographic sphere floating in an ancient temple chamber", height=120)
+        vid_prompt_input = st.text_area("Video Concept Prompt:", placeholder="e.g., A futuristic flying supercar speeding through neon cyberpunk Tokyo in the rain, cinematic lighting", height=120)
         
-        v_c1, v_c2 = st.columns(2)
-        v_style = v_c1.selectbox("Visual Motion Style", ["cinematic", "3d animation", "cyberpunk fluid", "anime timelapse", "hyper-lapse"])
-        v_fps = v_c2.selectbox("Quality Profile", ["Standard HD", "Ultra Dynamic 60FPS Simulation"])
+        v_c1, v_c2, v_c3 = st.columns(3)
+        v_motion = v_c1.selectbox("Camera Trajectory", ["Cinematic Zoom In", "Dynamic Pan Right", "Dramatic Tilt Up", "Orbital Pulse"])
+        v_duration = v_c2.selectbox("Duration", [3, 4, 5], index=1)
+        v_fps = v_c3.selectbox("Frame Rate", [24, 30], index=0)
 
-        generate_vid_btn = st.button("🎬 Render Motion Visual", type="primary", use_container_width=True)
+        generate_vid_btn = st.button("🎬 Synthesize MP4 Video", type="primary", use_container_width=True)
 
     with vid_col2:
         if generate_vid_btn and vid_prompt_input:
-            with st.spinner("Synthesizing dynamic motion visual frames..."):
-                motion_url = generate_video_url(vid_prompt_input, style=v_style)
-                st.image(motion_url, caption=f"Motion Render: {vid_prompt_input} ({v_style})", use_container_width=True)
+            with st.spinner("🎬 Synthesizing multi-frame AI video sequence and compiling MP4..."):
+                vid_path, vid_bytes = synthesize_ai_video(
+                    prompt=vid_prompt_input,
+                    motion_type=v_motion,
+                    duration_seconds=v_duration,
+                    fps=v_fps
+                )
                 
-                motion_bytes = download_media_bytes(motion_url)
-                if motion_bytes:
+                if vid_bytes and vid_path:
+                    st.success(f"✅ Real MP4 Video Generated and Saved: `{os.path.basename(vid_path)}`")
+                    st.video(vid_bytes)
+                    
                     st.download_button(
-                        "📥 Download Rendered Motion Frame",
-                        data=motion_bytes,
-                        file_name=f"motion_{int(time.time())}.jpg",
-                        mime="image/jpeg",
+                        "📥 Download MP4 Video File",
+                        data=vid_bytes,
+                        file_name=os.path.basename(vid_path),
+                        mime="video/mp4",
                         use_container_width=True
                     )
+                else:
+                    st.error("Video synthesis could not be completed. Please try again.")
         else:
-            st.info("Enter a motion prompt and select your style to generate a visual animation sequence.")
+            st.info("Enter your video prompt and click 'Synthesize MP4 Video' to create a real MP4 clip.")
 
 # ==========================================
-# TAB 5: OPENCLAW WORKSPACE & FILE MANAGER
+# TAB 5: OPENCLAW WORKSPACE FILE MANAGER
 # ==========================================
 with tab_files:
     st.subheader("📂 OpenClaw Workspace File Manager")
     st.caption(f"Active Workspace Root: `{WORKSPACE_DIR}`")
 
-    # File Explorer Toolbar
     f_action_col1, f_action_col2, f_action_col3 = st.columns([1, 1, 1])
 
     with f_action_col1:
         with st.expander("➕ Create New File"):
-            new_fname = st.text_input("File Path/Name:", placeholder="subfolder/notes.txt")
+            new_fname = st.text_input("File Path/Name:", placeholder="notes.txt")
             new_fcontent = st.text_area("Initial Content:", height=100)
             if st.button("Create File", use_container_width=True):
                 if new_fname:
@@ -357,7 +356,7 @@ with tab_files:
 
     with f_action_col2:
         with st.expander("📁 Create New Folder"):
-            new_dname = st.text_input("Folder Name:", placeholder="data/csv_exports")
+            new_dname = st.text_input("Folder Name:", placeholder="data")
             if st.button("Create Folder", use_container_width=True):
                 if new_dname:
                     res = fs_create_directory(new_dname)
@@ -377,15 +376,13 @@ with tab_files:
 
     st.markdown("---")
 
-    # Workspace File Browser & Editor
     browser_col, editor_col = st.columns([1, 2])
 
     with browser_col:
         st.markdown("##### 📁 Workspace Tree")
         file_tree_text = fs_list_files()
-        st.text_area("Directory Structure", value=file_tree_text, height=260, disabled=True)
+        st.text_area("Directory Tree", value=file_tree_text, height=260, disabled=True)
 
-        # Select file to inspect/edit
         all_files = []
         for r, _, fls in os.walk(WORKSPACE_DIR):
             for fl in fls:
@@ -413,11 +410,10 @@ with tab_files:
                 fs_write_file(selected_file, edited_content)
                 st.success(f"File '{selected_file}' updated successfully!")
         else:
-            st.info("Select a file from the dropdown on the left to read or edit its contents.")
+            st.info("Select a file from the dropdown on the left to read or edit.")
 
-    # Workspace Content Search (Grep)
     with st.expander("🔍 Search in Workspace Files"):
-        search_q = st.text_input("Enter keyword or code snippet to search:")
+        search_q = st.text_input("Enter keyword to search across all workspace files:")
         if search_q:
             results = fs_search_files(search_q)
             st.code(results, language="text")

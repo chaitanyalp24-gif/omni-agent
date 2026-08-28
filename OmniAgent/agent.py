@@ -10,6 +10,9 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 
 import requests
+import numpy as np
+from PIL import Image
+import imageio
 import google.generativeai as genai
 from duckduckgo_search import DDGS
 import matplotlib
@@ -20,10 +23,12 @@ import matplotlib.pyplot as plt
 # WORKSPACE & FILE SYSTEM CONFIGURATION
 # ==========================================
 WORKSPACE_DIR = os.path.abspath(os.path.join(os.getcwd(), "workspace"))
+VIDEOS_DIR = os.path.join(WORKSPACE_DIR, "videos")
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
+os.makedirs(VIDEOS_DIR, exist_ok=True)
 
 def _sanitize_path(subpath: str) -> str:
-    """Ensures safe paths confined strictly within the WORKSPACE_DIR."""
+    """Ensures safe paths confined strictly within WORKSPACE_DIR."""
     if not subpath:
         return WORKSPACE_DIR
     clean_subpath = subpath.strip().lstrip("/\\")
@@ -123,7 +128,7 @@ def fs_search_files(query: str) -> str:
         return f"Error searching files: {str(e)}"
 
 def create_workspace_zip() -> io.BytesIO:
-    """Compresses the entire workspace directory into an in-memory ZIP buffer."""
+    """Compresses the workspace into an in-memory ZIP buffer."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zip_file:
         for root, _, files in os.walk(WORKSPACE_DIR):
@@ -138,7 +143,7 @@ def create_workspace_zip() -> io.BytesIO:
 # CODE EXECUTION SANDBOX
 # ==========================================
 def execute_python_code(code: str) -> Dict[str, Any]:
-    """Executes Python code in a safe workspace scope and returns outputs/plots."""
+    """Executes Python code safely and captures stdout/stderr and plots."""
     old_stdout = sys.stdout
     old_stderr = sys.stderr
     captured_stdout = io.StringIO()
@@ -160,7 +165,6 @@ def execute_python_code(code: str) -> Dict[str, Any]:
         sys.stdout = captured_stdout
         sys.stderr = captured_stderr
 
-        # Custom global namespace with safe utilities
         sandbox_globals = {
             "__name__": "__main__",
             "os": os,
@@ -171,7 +175,6 @@ def execute_python_code(code: str) -> Dict[str, Any]:
 
         exec(code, sandbox_globals)
 
-        # Capture any matplotlib charts generated
         figs = [plt.figure(n) for n in plt.get_fignums()]
         if figs:
             execution_result["has_plots"] = True
@@ -214,35 +217,119 @@ def web_search(query: str, max_results: int = 5) -> str:
         return f"Web search could not retrieve results: {str(e)}"
 
 # ==========================================
-# AI IMAGE & VIDEO GENERATION
+# AI IMAGE & REAL VIDEO GENERATION
 # ==========================================
 def generate_image_url(prompt: str, width: int = 1024, height: int = 1024, seed: Optional[int] = None, model: str = "flux") -> str:
-    """Generates an image URL."""
+    """Generates a direct AI image URL."""
     encoded_prompt = urllib.parse.quote(prompt.strip())
     if seed is None:
         seed = random.randint(1, 999999)
-    # Using the verified Pollinations endpoint format
     return f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={seed}&model={model}&nologo=true"
 
-def generate_video_url(prompt: str, style: str = "cinematic") -> str:
-    """Creates a high-framerate dynamic motion visual preview URL."""
-    enhanced_prompt = f"{prompt}, {style} motion dynamic fluid sequence, looping visual animation"
-    encoded = urllib.parse.quote(enhanced_prompt.strip())
-    seed = random.randint(100, 99999)
-    return f"https://image.pollinations.ai/prompt/{encoded}?width=800&height=450&seed={seed}&model=flux&nologo=true"
-
 def download_media_bytes(url: str) -> Optional[bytes]:
-    """Downloads binary media bytes safely from a URL."""
+    """Downloads binary media safely from a URL."""
     try:
-        resp = requests.get(url, timeout=30)
+        headers = {"User-Agent": "OmniAgentOS/2.0"}
+        resp = requests.get(url, headers=headers, timeout=40)
         if resp.status_code == 200:
             return resp.content
         return None
     except Exception:
         return None
 
+def synthesize_ai_video(
+    prompt: str,
+    motion_type: str = "Cinematic Zoom In",
+    duration_seconds: int = 4,
+    fps: int = 24,
+    width: int = 800,
+    height: int = 450
+) -> Tuple[Optional[str], Optional[bytes]]:
+    """
+    Generates a true MP4 video file with fluid cinematic motion keyframing.
+    Saves the video inside workspace/videos/ and returns (filepath, video_bytes).
+    """
+    try:
+        # Step 1: Generate high-resolution base scene
+        seed = random.randint(100, 999999)
+        base_img_url = generate_image_url(prompt, width=1280, height=720, seed=seed, model="flux")
+        img_bytes = download_media_bytes(base_img_url)
+        
+        if not img_bytes:
+            raise RuntimeError("Failed to fetch base AI scene for video synthesis.")
+        
+        base_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        orig_w, orig_h = base_img.size
+        
+        total_frames = duration_seconds * fps
+        frames = []
+
+        # Step 2: Compute motion trajectory matrices
+        for i in range(total_frames):
+            progress = i / float(total_frames)
+            
+            if motion_type == "Cinematic Zoom In":
+                zoom = 1.0 + (0.28 * progress)
+                crop_w = int(orig_w / zoom)
+                crop_h = int(orig_h / zoom)
+                left = (orig_w - crop_w) // 2
+                top = (orig_h - crop_h) // 2
+                
+            elif motion_type == "Dynamic Pan Right":
+                zoom = 1.15
+                crop_w = int(orig_w / zoom)
+                crop_h = int(orig_h / zoom)
+                max_shift_x = orig_w - crop_w
+                left = int(max_shift_x * progress)
+                top = (orig_h - crop_h) // 2
+                
+            elif motion_type == "Dramatic Tilt Up":
+                zoom = 1.15
+                crop_w = int(orig_w / zoom)
+                crop_h = int(orig_h / zoom)
+                left = (orig_w - crop_w) // 2
+                max_shift_y = orig_h - crop_h
+                top = int(max_shift_y * (1.0 - progress))
+                
+            else: # "Orbital Pulse"
+                zoom = 1.0 + 0.15 * np.sin(progress * np.pi)
+                crop_w = int(orig_w / zoom)
+                crop_h = int(orig_h / zoom)
+                shift_x = int((orig_w - crop_w) * (0.5 + 0.3 * np.sin(progress * 2 * np.pi)))
+                left = max(0, min(orig_w - crop_w, shift_x))
+                top = (orig_h - crop_h) // 2
+
+            cropped = base_img.crop((left, top, left + crop_w, top + crop_h))
+            resized = cropped.resize((width, height), Image.Resampling.LANCZOS)
+            frames.append(np.array(resized))
+
+        # Step 3: Write out standard H.264 MP4 file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        video_filename = f"video_{timestamp}_{random.randint(100, 999)}.mp4"
+        video_path = os.path.join(VIDEOS_DIR, video_filename)
+
+        with imageio.get_writer(
+            video_path,
+            fps=fps,
+            codec='libx264',
+            format='FFMPEG',
+            pixelformat='yuv420p',
+            output_params=['-preset', 'medium', '-crf', '22']
+        ) as writer:
+            for frame in frames:
+                writer.append_data(frame)
+
+        with open(video_path, "rb") as vf:
+            video_bytes = vf.read()
+
+        return video_path, video_bytes
+
+    except Exception as e:
+        print(f"Video synthesis error: {e}")
+        return None, None
+
 def enhance_prompt_with_gemini(prompt: str, api_key: str, media_type: str = "image") -> str:
-    """Uses Gemini to turn a basic prompt into a production-grade prompt."""
+    """Uses Gemini to turn a basic prompt into an ultra-detailed descriptive prompt."""
     if not api_key:
         return prompt
     try:
@@ -258,7 +345,7 @@ def enhance_prompt_with_gemini(prompt: str, api_key: str, media_type: str = "ima
         return prompt
 
 # ==========================================
-# AGENTIC MULTI-TOOL BRAIN
+# DYNAMIC GEMINI MODEL RESOLUTION & AGENT BRAIN
 # ==========================================
 AGENT_SYSTEM_PROMPT = """You are OmniAgent OS, a state-of-the-art autonomous AI agent.
 You have native access to:
@@ -268,10 +355,8 @@ You have native access to:
 4. Image Studio Generator (`generate_image_url`)
 
 GUIDELINES:
-- When asked to perform web searches, coding tasks, or create/manage files, call the corresponding tools.
-- When generating code, save the files to the workspace whenever suitable.
+- When asked to search the live web, execute code, or manage files, proactively call the respective tools.
 - Provide clean, professional Markdown answers with step-by-step clarity.
-- When generating images, provide the user with the direct image markdown: `![Image Description](IMAGE_URL)`.
 """
 
 AVAILABLE_TOOLS = [
@@ -286,11 +371,52 @@ AVAILABLE_TOOLS = [
     generate_image_url
 ]
 
-def initialize_agent_model(api_key: str, model_name: str = "gemini-1.5-flash"):
-    """Initializes the Gemini model configured with the toolset."""
+def get_available_gemini_models(api_key: str) -> List[str]:
+    """Queries Google API to discover all valid models available for this specific API key."""
+    default_models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash", "gemini-1.5-flash-latest"]
+    if not api_key:
+        return default_models
+    try:
+        genai.configure(api_key=api_key)
+        discovered = []
+        for m in genai.list_models():
+            if "generateContent" in m.supported_generation_methods:
+                cleaned_name = m.name.replace("models/", "")
+                discovered.append(cleaned_name)
+        return discovered if discovered else default_models
+    except Exception:
+        return default_models
+
+def initialize_agent_model(api_key: str, preferred_model: str = "gemini-1.5-flash"):
+    """
+    Initializes the Gemini model with tool calling.
+    Includes auto-fallback to prevent 404 version/name errors.
+    """
     genai.configure(api_key=api_key)
-    return genai.GenerativeModel(
-        model_name=model_name,
-        system_instruction=AGENT_SYSTEM_PROMPT,
-        tools=AVAILABLE_TOOLS
-    )
+    clean_pref = preferred_model.replace("models/", "")
+    
+    # Priority cascade
+    candidates = [
+        clean_pref,
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-latest",
+        "gemini-2.0-flash",
+        "gemini-1.5-pro",
+        "gemini-1.5-flash-8b"
+    ]
+    candidates = list(dict.fromkeys(candidates))
+
+    last_error = None
+    for cand in candidates:
+        try:
+            model = genai.GenerativeModel(
+                model_name=cand,
+                system_instruction=AGENT_SYSTEM_PROMPT,
+                tools=AVAILABLE_TOOLS
+            )
+            return model, cand
+        except Exception as err:
+            last_error = err
+            continue
+
+    raise last_error
