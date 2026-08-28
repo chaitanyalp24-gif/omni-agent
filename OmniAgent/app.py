@@ -199,6 +199,7 @@ tab_chat, tab_code, tab_img, tab_video, tab_files = st.tabs([
 # ==========================================
 with tab_chat:
     st.caption("OmniAgent can plan and chain actions across web research, code, files and development commands instead of stopping after one response.")
+    st.caption("Gemini compatibility mode: conversation context is injected safely into the current request to avoid SDK history-slice errors.")
 
     # Display conversation. Use a speak control for assistant messages.
     for idx, msg in enumerate(st.session_state.chat_messages):
@@ -251,20 +252,47 @@ with tab_chat:
                         agent_model, active_model_used = initialize_agent_model(active_api_key, model_choice)
                         st.session_state.last_agent_model = active_model_used
 
-                        # Correct Gemini history format; do not mutate chat.history with ad-hoc dicts.
-                        recent_history = []
-                        for past_msg in st.session_state.chat_messages[:-1][-8:]:
-                            recent_history.append({
-                                "role": "user" if past_msg["role"] == "user" else "model",
-                                "parts": [past_msg["content"]],
-                            })
+                        # IMPORTANT SDK COMPATIBILITY FIX:
+                        # Some versions of the legacy google-generativeai SDK raise
+                        # "TypeError: slice indices must be integers or None or have an __index__ method"
+                        # when a hand-built history list is passed to start_chat().
+                        # Keep the SDK chat fresh and inject the recent conversation as plain
+                        # text context instead. This preserves context without using the
+                        # problematic history representation.
+                        previous_messages = st.session_state.chat_messages[:-1][-8:]
+                        context_blocks = []
+                        for past_msg in previous_messages:
+                            role = "USER" if past_msg["role"] == "user" else "ASSISTANT"
+                            content = str(past_msg.get("content", "")).strip()
+                            if content:
+                                # Keep the context bounded so large old responses do not
+                                # overwhelm the current task.
+                                context_blocks.append(f"{role}: {content[:4000]}")
+                        conversation_context = "\n".join(context_blocks)
 
-                        chat = agent_model.start_chat(
-                            history=recent_history,
-                            enable_automatic_function_calling=True,
-                        )
-                        response = chat.send_message(effective_prompt)
-                        response_text = (response.text or "").strip()
+                        prompt_for_model = effective_prompt
+                        if conversation_context:
+                            prompt_for_model = (
+                                "Earlier conversation context (do not repeat unless useful):\n"
+                                f"{conversation_context}\n\n"
+                                f"CURRENT USER REQUEST:\n{effective_prompt}"
+                            )
+
+                        try:
+                            chat = agent_model.start_chat(
+                                enable_automatic_function_calling=True,
+                            )
+                            response = chat.send_message(prompt_for_model)
+                        except TypeError as sdk_err:
+                            # Compatibility retry for older SDK/model combinations.
+                            # The retry removes automatic function calling only if the
+                            # first call itself hits the known SDK slicing bug.
+                            if "slice indices" not in str(sdk_err).lower():
+                                raise
+                            chat = agent_model.start_chat()
+                            response = chat.send_message(prompt_for_model)
+
+                        response_text = (getattr(response, "text", "") or "").strip()
                         if not response_text:
                             response_text = "✅ Task completed, but the model returned no final text. Check the workspace for generated files."
 
